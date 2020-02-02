@@ -24,6 +24,8 @@ pub enum RouterMessage {
     Connect((Connect, Sender<RouterMessage>)),
     /// Packet
     Packet(rumq_core::Packet),
+    /// Packets
+    Packets(Vec<rumq_core::Packet>),
     /// Disconnects a client from active connections list. Will handling
     Death(String),
     /// Pending messages of the previous connection
@@ -130,8 +132,21 @@ impl Router {
                     _ => return Ok(()),
                 }
             }
+            RouterMessage::Packets(packets) => {
+                handle_incoming_packets(&id, packets.clone(), &mut self.active_connections)?;
+                for packet in packets.into_iter() {
+                    let id = id.clone();
+                    match packet {
+                        Packet::Publish(publish) => self.match_subscriptions_and_forward(publish),
+                        Packet::Subscribe(subscribe) => self.add_to_subscriptions(id, subscribe),
+                        Packet::Unsubscribe(unsubscribe) => self.remove_from_subscriptions(id, unsubscribe),
+                        Packet::Disconnect => self.deactivate(id),
+                        _ => return Ok(()),
+                    }
+                }
+            }
             RouterMessage::Death(id) => self.deactivate_and_forward_will(id),
-            RouterMessage::Pending(_) => return Ok(())
+            RouterMessage::Pending(_) => return Ok(()),
         }
 
         Ok(())
@@ -341,7 +356,7 @@ impl Router {
                     // added again outside)
                     if let Some(index) = subscribers.iter().position(|s| s.client_id == id) {
                         let s = subscribers.remove(index);
-                        
+
                         if s.qos > qos {
                             qos = s.qos
                         }
@@ -467,6 +482,45 @@ fn handle_incoming_packet(id: &str, packet: Packet, active_connections: &mut Has
             }
         };
 
+        let reply = RouterMessage::Packet(reply);
+        if let Err(e) = connection.tx.try_send(reply) {
+            match e {
+                TrySendError::Full(_m) => {
+                    error!("Slow connection. Dropping handle and moving id to inactive list");
+                    active_connections.remove(id);
+                }
+                TrySendError::Closed(_m) => {
+                    error!("Closed connection. Forward failed");
+                    active_connections.remove(id);
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Saves state and sends network reply back to the connection
+fn handle_incoming_packets(id: &str, packets: Vec<Packet>, active_connections: &mut HashMap<String, ActiveConnection>) -> Result<(), Error> {
+    if let Some(connection) = active_connections.get_mut(id) {
+        let mut replys = Vec::new();
+
+        for packet in packets.into_iter() {
+            let reply = match connection.state.handle_incoming_mqtt_packet(packet) {
+                Ok(Some(reply)) => reply,
+                Ok(None) => continue,
+                Err(e) => {
+                    error!("State error = {:?}", e);
+                    active_connections.remove(id);
+                    return Err(Error::State)
+                }
+            };
+
+            replys.push(reply);
+        }
+
+
+        let reply = RouterMessage::Packets(replys);
         if let Err(e) = connection.tx.try_send(reply) {
             match e {
                 TrySendError::Full(_m) => {

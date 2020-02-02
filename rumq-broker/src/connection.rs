@@ -14,6 +14,7 @@ use crate::ServerSettings;
 
 use std::sync::Arc;
 use std::time::Duration;
+use std::mem;
 
 #[derive(Debug, From)]
 pub enum Error {
@@ -47,6 +48,7 @@ struct Connection<S> {
     stream:     S,
     this_rx:    Receiver<RouterMessage>,
     router_tx:  Sender<(String, RouterMessage)>,
+    packets: Vec<Packet>
 }
 
 impl<S: Network> Connection<S> {
@@ -67,7 +69,7 @@ impl<S: Network> Connection<S> {
         // construct connect router message with cliend id and handle to this connection
         let routermessage = RouterMessage::Connect((connect, this_tx));
         router_tx.try_send((id.clone(), routermessage))?;
-        let connection = Connection { id, keep_alive, stream, this_rx, router_tx };
+        let connection = Connection { id, keep_alive, stream, this_rx, router_tx, packets: Vec::new()};
         Ok(connection)
     }
 
@@ -126,8 +128,13 @@ impl<S: Network> Connection<S> {
                         match o?? {
                             Packet::Pingreq => self.stream.mqtt_write(&Packet::Pingresp).await?,
                             packet => {
-                                let message = RouterMessage::Packet(packet);
-                                self.forward_to_router(&id, message)?;
+                                self.packets.push(packet);
+
+                                if self.packets.len() >= 1000 {
+                                    let packets = mem::replace(&mut self.packets, Vec::new());
+                                    let message = RouterMessage::Packets(packets);
+                                    self.forward_to_router(&id, message)?;
+                                }
                             }
                         };
                     }
@@ -180,6 +187,11 @@ impl<S: Network> Connection<S> {
                     Some(message) => {
                         match message {
                             RouterMessage::Packet(packet) => self.stream.mqtt_write(&packet).await?,
+                            RouterMessage::Packets(packets) => {
+                                for packet in packets.into_iter() {
+                                    self.stream.mqtt_write(&packet).await?;
+                                }
+                            }
                             _ => return Err(Error::WrongPacket)
                         }
                     }
