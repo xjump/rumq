@@ -12,6 +12,8 @@ use crate::Network;
 use crate::ServerSettings;
 
 use std::sync::Arc;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::time::Duration;
 
 #[derive(Debug, From)]
@@ -26,8 +28,8 @@ pub enum Error {
     NotConnack
 }
 
-pub async fn eventloop(config: Arc<ServerSettings>, stream: impl Network, mut router_tx: Sender<(String, RouterMessage)>) -> Result<String, Error> {
-    let mut connection = Connection::new(config, stream, router_tx.clone()).await?;
+pub async fn eventloop(config: Arc<ServerSettings>, router: Rc<RefCell<router::Router>>, stream: impl Network, mut router_tx: Sender<(String, RouterMessage)>) -> Result<String, Error> {
+    let mut connection = Connection::new(config, stream, router, router_tx.clone()).await?;
     let id = connection.id.clone();
 
     if let Err(err) = connection.run().await {
@@ -43,11 +45,12 @@ pub struct Connection<S> {
     keep_alive: Duration,
     stream:     S,
     this_rx:    Receiver<RouterMessage>,
+    router: Rc<RefCell<router::Router>>,
     router_tx:  Sender<(String, RouterMessage)>,
 }
 
 impl<S: Network> Connection<S> {
-    async fn new(config: Arc<ServerSettings>, mut stream: S, mut router_tx: Sender<(String, RouterMessage)>) -> Result<Connection<S>, Error> {
+    async fn new(config: Arc<ServerSettings>, mut stream: S, router: Rc<RefCell<router::Router>>, mut router_tx: Sender<(String, RouterMessage)>) -> Result<Connection<S>, Error> {
         let (this_tx, this_rx) = channel(100);
         let timeout = Duration::from_millis(config.connection_timeout_ms.into());
         let connect = time::timeout(timeout, async {
@@ -64,7 +67,7 @@ impl<S: Network> Connection<S> {
         // construct connect router message with cliend id and handle to this connection
         let routermessage = RouterMessage::Connect(router::Connection::new(connect, this_tx));
         router_tx.send((id.clone(), routermessage)).await?;
-        let connection = Connection { id, keep_alive, stream, this_rx, router_tx };
+        let connection = Connection { id, keep_alive, stream, router, this_rx, router_tx };
         Ok(connection)
     }
 
@@ -94,9 +97,7 @@ impl<S: Network> Connection<S> {
             
             let mut pending = iter(pending.drain(..)).map(Packet::Publish);
             loop {
-                // let stream = &mut self.stream;
                 let keep_alive = self.keep_alive + self.keep_alive.mul_f32(0.5);
-
                 let packet = time::timeout(keep_alive, async {
                     let packet = stream.mqtt_read().await?;
                     Ok::<_, Error>(packet)
@@ -109,8 +110,8 @@ impl<S: Network> Connection<S> {
                             Packet::Pingreq => stream.mqtt_write(&Packet::Pingresp).await?,
                             packet => {
                                 debug!("{:?}", packet);
-                                let message = RouterMessage::Packet(packet);
-                                self.router_tx.send((id.to_owned(), message)).await?;
+                                // let message = RouterMessage::Packet(packet);
+                                // self.router_tx.send((id.to_owned(), message)).await?;
                             }
                         };
                     }

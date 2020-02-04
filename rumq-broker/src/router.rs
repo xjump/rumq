@@ -154,9 +154,7 @@ impl Router {
                     Packet::Subscribe(subscribe) => self.add_to_subscriptions(id, subscribe),
                     Packet::Unsubscribe(unsubscribe) => self.remove_from_subscriptions(id, unsubscribe),
                     Packet::Disconnect => self.deactivate(id),
-                    _ => {
-                        unimplemented!()
-                    }
+                    _ => return Ok(()) 
                 }
             }
             RouterMessage::Death(id) => self.deactivate_and_forward_will(id),

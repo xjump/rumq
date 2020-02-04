@@ -9,6 +9,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{channel, Sender, Receiver};
 use tokio::task;
+use tokio::task::LocalSet;
 use tokio::time::{self, Elapsed};
 use tokio_rustls::rustls::internal::pemfile::{certs, rsa_private_keys};
 use tokio_rustls::rustls::TLSError;
@@ -22,6 +23,8 @@ use std::io::{self, BufReader};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::thread;
 
 mod connection;
@@ -106,7 +109,7 @@ async fn tls_connection<P: AsRef<Path>>(ca_path: Option<P>, cert_path: P, key_pa
     Ok(acceptor)
 }
 
-pub async fn accept_loop(config: Arc<ServerSettings>, router_tx: Sender<(String, router::RouterMessage)>) -> Result<(), Error> {
+pub async fn accept_loop(localset: Arc<LocalSet>, config: Arc<ServerSettings>, router: Rc<RefCell<router::Router>>, router_tx: Sender<(String, router::RouterMessage)>) -> Result<(), Error> {
     let addr = format!("0.0.0.0:{}", config.port);
     let connection_config = config.clone();
 
@@ -133,7 +136,7 @@ pub async fn accept_loop(config: Arc<ServerSettings>, router_tx: Sender<(String,
 
         let config = connection_config.clone();
         let router_tx = router_tx.clone();
-
+        let router = router.clone();
         if let Some(acceptor) = &acceptor {
             let stream = match acceptor.accept(stream).await {
                 Ok(s) => s,
@@ -143,17 +146,22 @@ pub async fn accept_loop(config: Arc<ServerSettings>, router_tx: Sender<(String,
                 }
             };
 
-            task::spawn(eventloop(config, stream, router_tx));
+            // Run the local task set.
+            localset.run_until(async move {
+                task::spawn_local(eventloop(config, router, stream, router_tx));
+            }).await;
         } else {
-            task::spawn(eventloop(config, stream, router_tx));
+            localset.run_until(async move {
+                task::spawn_local(eventloop(config, router, stream, router_tx));
+            }).await;
         };
 
         time::delay_for(Duration::from_millis(10)).await;
     }
 }
 
-async fn eventloop(config: Arc<ServerSettings>, stream: impl Network, router_tx: Sender<(String, router::RouterMessage)>) {
-    match connection::eventloop(config, stream, router_tx).await {
+async fn eventloop(config: Arc<ServerSettings>, router: Rc<RefCell<router::Router>>, stream: impl Network, router_tx: Sender<(String, router::RouterMessage)>) {
+    match connection::eventloop(config, router, stream, router_tx).await {
         Ok(id) => info!("Connection eventloop done!!. Id = {:?}", id),
         Err(e) => error!("Connection eventloop error = {:?}", e),
     }
@@ -171,11 +179,13 @@ async fn router(rx: Receiver<(String, router::RouterMessage)>) {
 pub async fn start(config: Config) {
     let (router_tx, router_rx) = channel(100);
 
+    let router = router::Router::new(router_rx);
+    let router = Rc::new(RefCell::new(router));
     // router to route data between connections. creates an extra copy but
     // might not be a big deal if we prevent clones/send fat pointers and batch
-    thread::spawn(move || {
-        router(router_rx)
-    });
+    // thread::spawn(move || {
+    //     router(router_rx)
+    // });
 
     let http_router_tx = router_tx.clone();
     // TODO: Remove clone on main config
@@ -189,19 +199,14 @@ pub async fn start(config: Config) {
         httppush::start(httppush_config, status_router_tx).await;
     });
 
-    let mut servers = Vec::new();
-    for server in config.servers.into_iter() {
-        let config = Arc::new(server);
-
-        let fut = accept_loop(config, router_tx.clone());
-        let o = task::spawn(async {
-            error!("Accept loop returned = {:?}", fut.await);
-        });
-
-        servers.push(o);
-    }
-
-    join_all(servers).await;
+    let local = task::LocalSet::new();
+    let local = Arc::new(local);
+    let server = config.servers.get(0).unwrap().clone();
+    let config = Arc::new(server);
+    let fut = accept_loop(local.clone(), config, router.clone(), router_tx.clone());
+    local.run_until(async move {
+        task::spawn_local(fut).await.unwrap().unwrap();
+    }).await;
 }
 
 pub trait Network: AsyncWrite + AsyncRead + Unpin + Send {}
