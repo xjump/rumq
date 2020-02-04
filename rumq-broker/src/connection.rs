@@ -80,14 +80,13 @@ impl<S: Network> Connection<S> {
             }
         };
 
-
-        let connectionack = match message {
-            RouterMessage::Pending(connack) => connack,
+        let mut pending = match message {
+            RouterMessage::Pending(pending) => pending,
             _ => return Err(Error::NotConnack)
         };
         
         // eventloop which pending packets from the last session 
-        if let Some(mut pending) = connectionack {
+        if pending.len() > 0 {
             error!("Pending = {:?}", pending);
             let connack = connack(ConnectReturnCode::Accepted, true);
             let packet = Packet::Connack(connack);
@@ -109,6 +108,7 @@ impl<S: Network> Connection<S> {
                         match o?? {
                             Packet::Pingreq => stream.mqtt_write(&Packet::Pingresp).await?,
                             packet => {
+                                debug!("{:?}", packet);
                                 let message = RouterMessage::Packet(packet);
                                 self.router_tx.send((id.to_owned(), message)).await?;
                             }
@@ -155,6 +155,7 @@ impl<S: Network> Connection<S> {
                     match o?? {
                         Packet::Pingreq => self.stream.mqtt_write(&Packet::Pingresp).await?,
                         packet => {
+                            debug!("{:?}", packet);
                             let message = RouterMessage::Packet(packet);
                             self.router_tx.send((id.to_owned(), message)).await?;
                         }
