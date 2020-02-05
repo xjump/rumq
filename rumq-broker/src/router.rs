@@ -1,7 +1,7 @@
 use derive_more::From;
 use rumq_core::{has_wildcards, matches, Connect, Packet, Publish, QoS, Subscribe, Unsubscribe};
 use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::mpsc::{Receiver, Sender};
+use tokio::sync::mpsc::Sender;
 
 use std::collections::{HashMap, VecDeque};
 use std::fmt;

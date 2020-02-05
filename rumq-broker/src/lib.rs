@@ -6,20 +6,13 @@ extern crate log;
 use derive_more::From;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
-use tokio::sync::mpsc::{channel, Sender, Receiver};
 use tokio::task;
-use tokio::task::LocalSet;
 use tokio::time::{self, Elapsed};
-use tokio_rustls::rustls::internal::pemfile::{certs, rsa_private_keys};
 use tokio_rustls::rustls::TLSError;
-use tokio_rustls::rustls::{AllowAnyAuthenticatedClient, NoClientAuth, RootCertStore, ServerConfig};
-use tokio_rustls::TlsAcceptor;
 
 use serde::Deserialize;
 
-use std::fs::File;
-use std::io::{self, BufReader};
-use std::path::Path;
+use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 use std::cell::RefCell;
@@ -89,36 +82,11 @@ pub struct ServerSettings {
     pub password: Option<String>,
 }
 
-async fn tls_connection<P: AsRef<Path>>(ca_path: Option<P>, cert_path: P, key_path: P) -> Result<TlsAcceptor, Error> {
-    // client authentication with a CA. CA isn't required otherwise
-    let mut server_config = if let Some(ca_path) = ca_path {
-        let mut root_cert_store = RootCertStore::empty();
-        root_cert_store.add_pem_file(&mut BufReader::new(File::open(ca_path)?)).map_err(|_| Error::NoCAFile)?;
-        ServerConfig::new(AllowAnyAuthenticatedClient::new(root_cert_store))
-    } else {
-        ServerConfig::new(NoClientAuth::new())
-    };
-
-    let certs = certs(&mut BufReader::new(File::open(cert_path)?)).map_err(|_| Error::NoServerCertFile)?;
-    let mut keys = rsa_private_keys(&mut BufReader::new(File::open(key_path)?)).map_err(|_| Error::NoServerKeyFile)?;
-
-    server_config.set_single_cert(certs, keys.remove(0))?;
-    let acceptor = TlsAcceptor::from(Arc::new(server_config));
-    Ok(acceptor)
-}
-
 pub async fn accept_loop(config: Arc<ServerSettings>, router: Rc<RefCell<router::Router>>) -> Result<(), Error> {
     let local = task::LocalSet::new();
     let local = Arc::new(local);
     let addr = format!("0.0.0.0:{}", config.port);
     let connection_config = config.clone();
-
-    let acceptor = if let Some(cert_path) = config.cert_path.clone() {
-        let key_path = config.key_path.clone().ok_or(Error::NoServerPrivateKey)?;
-        Some(tls_connection(config.ca_path.clone(), cert_path, key_path).await?)
-    } else {
-        None
-    };
 
     info!("Waiting for connections on {}", addr);
     // eventloop which accepts connections
@@ -129,7 +97,7 @@ pub async fn accept_loop(config: Arc<ServerSettings>, router: Rc<RefCell<router:
                 Ok(s) => s,
                 Err(e) => {
                     error!("Tcp connection error = {:?}", e);
-                    continue;
+                    break;
                 }
             };
 
@@ -137,12 +105,7 @@ pub async fn accept_loop(config: Arc<ServerSettings>, router: Rc<RefCell<router:
 
             let config = connection_config.clone();
             let router = router.clone();
-            if let Some(acceptor) = &acceptor {
-                unimplemented!()
-            } else {
-                task::spawn_local(eventloop(config, router, stream));
-            };
-
+            task::spawn_local(eventloop(config, router, stream));
             time::delay_for(Duration::from_millis(10)).await;
         }
 
