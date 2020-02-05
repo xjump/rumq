@@ -139,10 +139,10 @@ impl<S: Network> Connection<S> {
             let keep_alive = self.keep_alive + self.keep_alive.mul_f32(0.5);
 
             // TODO: Use Delay::reset to not construct this timeout future everytime
-            let packet = time::timeout(keep_alive, async {
+            let packet = async {
                 let packet = stream.mqtt_read().await?;
                 Ok::<_, Error>(packet)
-            });
+            };
 
             let this_rx = &mut self.this_rx;
             let message = async {
@@ -152,7 +152,7 @@ impl<S: Network> Connection<S> {
             select! {
                 // read packets from network and generate network reply and router message
                 o = packet => {
-                    match o?? {
+                    match o? {
                         Packet::Pingreq => self.stream.mqtt_write(&Packet::Pingresp).await?,
                         packet => {
                             let message = RouterMessage::Packet(packet);

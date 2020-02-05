@@ -206,6 +206,7 @@ impl Router {
                 self.retained_publishes.remove(&publish.topic_name);
                 return
             } else {
+                dbg!();
                 self.retained_publishes.insert(publish.topic_name.clone(), publish.clone());
             }
         }

@@ -177,18 +177,6 @@ pub async fn start(config: Config) {
         router(router_rx)
     });
 
-    let http_router_tx = router_tx.clone();
-    // TODO: Remove clone on main config
-    let httpserver_config = Arc::new(config.clone());
-    task::spawn(async move { httpserver::start(httpserver_config, http_router_tx).await });
-
-    let status_router_tx = router_tx.clone();
-    // TODO: Remove clone on main config
-    let httppush_config = Arc::new(config.clone());
-    task::spawn(async move {
-        httppush::start(httppush_config, status_router_tx).await;
-    });
-
     let mut servers = Vec::new();
     for server in config.servers.into_iter() {
         let config = Arc::new(server);

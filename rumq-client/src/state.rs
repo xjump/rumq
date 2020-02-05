@@ -119,7 +119,7 @@ impl MqttState {
     pub fn handle_incoming_mqtt_packet(&mut self, packet: Packet) -> Result<(Option<Notification>, Option<Packet>), StateError> {
         let out = match packet {
             Packet::Pingresp => self.handle_incoming_pingresp(),
-            Packet::Publish(publish) => self.handle_incoming_publish(publish.clone()),
+            Packet::Publish(publish) => self.handle_incoming_publish(publish),
             Packet::Suback(_pkid) => Ok((None, None)),
             Packet::Unsuback(_pkid) => Ok((None, None)),
             Packet::Puback(pkid) => self.handle_incoming_puback(pkid),
