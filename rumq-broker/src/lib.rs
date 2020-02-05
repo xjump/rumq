@@ -4,7 +4,6 @@
 extern crate log;
 
 use derive_more::From;
-use futures_util::future::join_all;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::net::TcpListener;
 use tokio::sync::mpsc::{channel, Sender, Receiver};
@@ -25,7 +24,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::thread;
 
 mod connection;
 mod httppush;
@@ -109,7 +107,9 @@ async fn tls_connection<P: AsRef<Path>>(ca_path: Option<P>, cert_path: P, key_pa
     Ok(acceptor)
 }
 
-pub async fn accept_loop(localset: Arc<LocalSet>, config: Arc<ServerSettings>, router: Rc<RefCell<router::Router>>, router_tx: Sender<(String, router::RouterMessage)>) -> Result<(), Error> {
+pub async fn accept_loop(config: Arc<ServerSettings>, router: Rc<RefCell<router::Router>>) -> Result<(), Error> {
+    let local = task::LocalSet::new();
+    let local = Arc::new(local);
     let addr = format!("0.0.0.0:{}", config.port);
     let connection_config = config.clone();
 
@@ -123,90 +123,50 @@ pub async fn accept_loop(localset: Arc<LocalSet>, config: Arc<ServerSettings>, r
     info!("Waiting for connections on {}", addr);
     // eventloop which accepts connections
     let mut listener = TcpListener::bind(addr).await?;
-    loop {
-        let (stream, addr) = match listener.accept().await {
-            Ok(s) => s,
-            Err(e) => {
-                error!("Tcp connection error = {:?}", e);
-                continue;
-            }
-        };
-
-        info!("Accepting from: {}", addr);
-
-        let config = connection_config.clone();
-        let router_tx = router_tx.clone();
-        let router = router.clone();
-        if let Some(acceptor) = &acceptor {
-            let stream = match acceptor.accept(stream).await {
+    local.run_until(async move {
+        loop {
+            let (stream, addr) = match listener.accept().await {
                 Ok(s) => s,
                 Err(e) => {
-                    error!("Tls connection error = {:?}", e);
+                    error!("Tcp connection error = {:?}", e);
                     continue;
                 }
             };
 
-            // Run the local task set.
-            localset.run_until(async move {
-                task::spawn_local(eventloop(config, router, stream, router_tx));
-            }).await;
-        } else {
-            localset.run_until(async move {
-                task::spawn_local(eventloop(config, router, stream, router_tx));
-            }).await;
-        };
+            info!("Accepting from: {}", addr);
 
-        time::delay_for(Duration::from_millis(10)).await;
-    }
+            let config = connection_config.clone();
+            let router = router.clone();
+            if let Some(acceptor) = &acceptor {
+                unimplemented!()
+            } else {
+                task::spawn_local(eventloop(config, router, stream));
+            };
+
+            time::delay_for(Duration::from_millis(10)).await;
+        }
+
+        Ok::<_, ()>(())
+    }).await.unwrap();
+
+    Ok(())
 }
-
-async fn eventloop(config: Arc<ServerSettings>, router: Rc<RefCell<router::Router>>, stream: impl Network, router_tx: Sender<(String, router::RouterMessage)>) {
-    match connection::eventloop(config, router, stream, router_tx).await {
+async fn eventloop(config: Arc<ServerSettings>, router: Rc<RefCell<router::Router>>, stream: impl Network) {
+    match connection::eventloop(config, router, stream).await {
         Ok(id) => info!("Connection eventloop done!!. Id = {:?}", id),
         Err(e) => error!("Connection eventloop error = {:?}", e),
     }
 }
 
-#[tokio::main(core_threads = 1)]
-async fn router(rx: Receiver<(String, router::RouterMessage)>) {
-    let mut router = router::Router::new(rx);
-    if let Err(e) = router.start().await {
-        error!("Router stopped. Error = {:?}", e);
-    }
-}
-
-#[tokio::main(core_threads = 1)]
+#[tokio::main]
 pub async fn start(config: Config) {
-    let (router_tx, router_rx) = channel(100);
-
-    let router = router::Router::new(router_rx);
+    let router = router::Router::new();
     let router = Rc::new(RefCell::new(router));
-    // router to route data between connections. creates an extra copy but
-    // might not be a big deal if we prevent clones/send fat pointers and batch
-    // thread::spawn(move || {
-    //     router(router_rx)
-    // });
 
-    let http_router_tx = router_tx.clone();
-    // TODO: Remove clone on main config
-    let httpserver_config = Arc::new(config.clone());
-    task::spawn(async move { httpserver::start(httpserver_config, http_router_tx).await });
-
-    let status_router_tx = router_tx.clone();
-    // TODO: Remove clone on main config
-    let httppush_config = Arc::new(config.clone());
-    task::spawn(async move {
-        httppush::start(httppush_config, status_router_tx).await;
-    });
-
-    let local = task::LocalSet::new();
-    let local = Arc::new(local);
     let server = config.servers.get(0).unwrap().clone();
     let config = Arc::new(server);
-    let fut = accept_loop(local.clone(), config, router.clone(), router_tx.clone());
-    local.run_until(async move {
-        task::spawn_local(fut).await.unwrap().unwrap();
-    }).await;
+    let fut = accept_loop(config, router.clone());
+    fut.await.unwrap();
 }
 
 pub trait Network: AsyncWrite + AsyncRead + Unpin + Send {}

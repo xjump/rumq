@@ -1,11 +1,11 @@
 use derive_more::From;
-use rumq_core::{has_wildcards, matches, QoS, Packet, Connect, Publish, Subscribe, Unsubscribe};
-use tokio::sync::mpsc::{Receiver, Sender};
+use rumq_core::{has_wildcards, matches, Connect, Packet, Publish, QoS, Subscribe, Unsubscribe};
 use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::mpsc::{Receiver, Sender};
 
 use std::collections::{HashMap, VecDeque};
-use std::mem;
 use std::fmt;
+use std::mem;
 
 use crate::state::{self, MqttState};
 
@@ -28,20 +28,17 @@ pub enum RouterMessage {
     /// Disconnects a client from active connections list. Will handling
     Death(String),
     /// Pending messages of the previous connection
-    Pending(VecDeque<Publish>)
+    Pending(VecDeque<Publish>),
 }
 
 pub struct Connection {
     pub connect: rumq_core::Connect,
-    pub handle: Sender<RouterMessage>
+    pub handle: Sender<RouterMessage>,
 }
 
 impl Connection {
     pub fn new(connect: rumq_core::Connect, handle: Sender<RouterMessage>) -> Connection {
-        Connection {
-            connect,
-            handle
-        }
+        Connection { connect, handle }
     }
 }
 
@@ -54,28 +51,23 @@ impl fmt::Debug for Connection {
 #[derive(Debug)]
 struct ActiveConnection {
     pub state: MqttState,
-    tx: Sender<RouterMessage>
+    tx: Sender<RouterMessage>,
 }
 
 impl ActiveConnection {
     pub fn new(tx: Sender<RouterMessage>, state: MqttState) -> ActiveConnection {
-        ActiveConnection {
-            state,
-            tx
-        }
+        ActiveConnection { state, tx }
     }
 }
 
 #[derive(Debug)]
 struct InactiveConnection {
-    pub state: MqttState
+    pub state: MqttState,
 }
 
 impl InactiveConnection {
     pub fn new(state: MqttState) -> InactiveConnection {
-        InactiveConnection {
-            state,
-        }
+        InactiveConnection { state }
     }
 }
 
@@ -87,84 +79,39 @@ struct Subscriber {
 
 impl Subscriber {
     pub fn new(id: &str, qos: QoS) -> Subscriber {
-        Subscriber {
-            client_id: id.to_owned(),
-            qos,
-        }
+        Subscriber { client_id: id.to_owned(), qos }
     }
 }
 
 pub struct Router {
     // handles to all active connections. used to route data
-    active_connections:     HashMap<String, ActiveConnection>,
+    active_connections: HashMap<String, ActiveConnection>,
     // inactive persistent connections
-    inactive_connections:   HashMap<String, InactiveConnection>,
+    inactive_connections: HashMap<String, InactiveConnection>,
     // maps concrete subscriptions to interested subscribers
     concrete_subscriptions: HashMap<String, Vec<Subscriber>>,
     // maps wildcard subscriptions to interested subscribers
-    wild_subscriptions:     HashMap<String, Vec<Subscriber>>,
+    wild_subscriptions: HashMap<String, Vec<Subscriber>>,
     // retained publishes
-    retained_publishes:     HashMap<String, Publish>,
-    // channel receiver to receive data from all the active_connections.
-    // each connection will have a tx handle
-    data_rx:                Receiver<(String, RouterMessage)>,
+    retained_publishes: HashMap<String, Publish>,
 }
 
 impl Router {
-    pub fn new(data_rx: Receiver<(String, RouterMessage)>) -> Self {
+    pub fn new() -> Self {
         Router {
             active_connections: HashMap::new(),
             inactive_connections: HashMap::new(),
             concrete_subscriptions: HashMap::new(),
             wild_subscriptions: HashMap::new(),
             retained_publishes: HashMap::new(),
-            data_rx,
         }
     }
 
-    pub async fn start(&mut self) -> Result<(), Error> {
-        loop {
-            let (id, message) = match self.data_rx.recv().await {
-                Some(message) => message,
-                None => return Err(Error::AllSendersDown),
-            };
-
-            if let Err(err) = self.handle_incoming_router_message(id, message) {
-                error!("Handle packet error = {:?}", err);
-            }
-        }
-    }
-
-    fn handle_incoming_router_message(&mut self, id: String, message: RouterMessage) -> Result<(), Error> {
-        debug!("Incoming router message. Id = {}, {:?}", id, message);
-        match message {
-            RouterMessage::Connect(connection) => {
-                if let Some(reply) = self.handle_connect(connection.connect, connection.handle)? {
-                    self.forward(&id, reply)
-                } else {
-                    self.forward(&id, RouterMessage::Pending(VecDeque::new()))
-                }
-            }
-            RouterMessage::Packet(packet) => {
-                if let Some(reply) = self.handle_incoming_packet(&id, packet.clone())? {
-                    self.forward(&id, reply)
-                }
-                match packet {
-                    Packet::Publish(publish) => self.match_subscriptions_and_forward(&id, publish),
-                    Packet::Subscribe(subscribe) => self.add_to_subscriptions(id, subscribe),
-                    Packet::Unsubscribe(unsubscribe) => self.remove_from_subscriptions(id, unsubscribe),
-                    Packet::Disconnect => self.deactivate(id),
-                    _ => return Ok(()) 
-                }
-            }
-            RouterMessage::Death(id) => self.deactivate_and_forward_will(id),
-            _ => unimplemented!()
-        }
-
-        Ok(())
-    }
-
-    fn handle_connect(&mut self, connect: Connect, connection_handle: Sender<RouterMessage>) -> Result<Option<RouterMessage>, Error> {
+    pub fn handle_connect(
+        &mut self,
+        connect: Connect,
+        connection_handle: Sender<RouterMessage>,
+    ) -> Result<Option<RouterMessage>, Error> {
         let id = connect.client_id;
         let clean_session = connect.clean_session;
         let will = connect.last_will;
@@ -206,11 +153,11 @@ impl Router {
         Ok(reply)
     }
 
-    fn match_subscriptions_and_forward(&mut self, _id: &str, publish: Publish) {
+    pub fn match_subscriptions_and_forward(&mut self, _id: &str, publish: Publish) {
         if publish.retain {
             if publish.payload.len() == 0 {
                 self.retained_publishes.remove(&publish.topic_name);
-                return
+                return;
             } else {
                 self.retained_publishes.insert(publish.topic_name.clone(), publish.clone());
             }
@@ -226,7 +173,7 @@ impl Router {
 
         // TODO: O(n) which happens during every publish. publish perf is going to be
         // linearly degraded based on number of wildcard subscriptions. fix this
-        let wild_subscriptions = self.wild_subscriptions.clone(); 
+        let wild_subscriptions = self.wild_subscriptions.clone();
         for (filter, subscribers) in wild_subscriptions.into_iter() {
             if matches(topic, &filter) {
                 for subscriber in subscribers.into_iter() {
@@ -234,11 +181,10 @@ impl Router {
                     self.forward_publish(&subscriber, publish);
                 }
             }
-        };
+        }
     }
 
-
-    fn add_to_subscriptions(&mut self, id: String, subscribe: Subscribe) {
+    pub fn add_to_subscriptions(&mut self, id: String, subscribe: Subscribe) {
         // Each subscribe message can send multiple topics to subscribe to. handle dupicates
         for topic in subscribe.topics() {
             let mut filter = topic.topic_path().clone();
@@ -253,11 +199,8 @@ impl Router {
             };
 
             // a publish happens on a/b/c.
-            let subscriptions = if has_wildcards(&filter) {
-                &mut self.wild_subscriptions
-            } else {
-                &mut self.concrete_subscriptions
-            };
+            let subscriptions =
+                if has_wildcards(&filter) { &mut self.wild_subscriptions } else { &mut self.concrete_subscriptions };
 
             // add client id to subscriptions
             match subscriptions.get_mut(&filter) {
@@ -309,19 +252,19 @@ impl Router {
     /// subscription with highest qos
     ///
     /// * any new wildcard subsciption checks for matching concrete subscriber
-    /// * if matches, add the subscriber to `wild_subscriptions` with greatest qos 
+    /// * if matches, add the subscriber to `wild_subscriptions` with greatest qos
     ///
     /// * any new concrete subscriber checks for matching wildcard subscriber
     /// * if matches, add the subscriber to `wild_subscriptions` (instead of concrete subscription) with greatest qos
-    /// 
+    ///
     /// coming to overlapping wildcard subscriptions
     ///
-    /// * new subsciber-a a/+/c/d  mathes subscriber-a in a/# 
+    /// * new subsciber-a a/+/c/d  mathes subscriber-a in a/#
     /// * add subscriber-a to a/# directly with highest qos
-    /// 
+    ///
     /// * new subscriber a/# matches with existing a/+/c/d
     /// * remove subscriber from a/+/c/d and move it to a/# with highest qos
-    /// 
+    ///
     /// * finally a subscriber won't be part of multiple subscriptions
     fn fix_overlapping_subscriptions(&mut self, id: &str, current_filter: &str, qos: QoS) -> Option<(String, Subscriber)> {
         let mut subscriber = None;
@@ -370,21 +313,21 @@ impl Router {
                         }
 
                         subscriber = Some(s);
-                    }   
+                    }
                 }
             }
-        } 
+        }
 
         match subscriber {
             Some(mut subscriber) => {
                 subscriber.qos = qos;
                 Some((filter, subscriber))
             }
-            None => None
+            None => None,
         }
     }
 
-    fn remove_from_subscriptions(&mut self, id: String, unsubscribe: Unsubscribe) {
+    pub fn remove_from_subscriptions(&mut self, id: String, unsubscribe: Unsubscribe) {
         for topic in unsubscribe.topics.iter() {
             if has_wildcards(topic) {
                 // remove client from the concrete subscription list incase of a matching wildcard
@@ -410,7 +353,7 @@ impl Router {
         }
     }
 
-    fn deactivate(&mut self, id: String) {
+    pub fn deactivate(&mut self, id: String) {
         info!("Deactivating client due to disconnect packet. Id = {}", id);
 
         if let Some(connection) = self.active_connections.remove(&id) {
@@ -420,7 +363,7 @@ impl Router {
         }
     }
 
-    fn deactivate_and_forward_will(&mut self, id: String) {
+    pub fn deactivate_and_forward_will(&mut self, id: String) {
         info!("Deactivating client due to connection death. Id = {}", id);
 
         if let Some(mut connection) = self.active_connections.remove(&id) {
@@ -442,7 +385,7 @@ impl Router {
     }
 
     /// Saves state and sends network reply back to the connection
-    fn handle_incoming_packet(&mut self, id: &str, packet: Packet) -> Result<Option<RouterMessage>, Error> {
+    pub fn handle_incoming_packet(&mut self, id: &str, packet: Packet) -> Result<Option<Packet>, Error> {
         if let Some(connection) = self.active_connections.get_mut(id) {
             let reply = match connection.state.handle_incoming_mqtt_packet(packet) {
                 Ok(Some(reply)) => reply,
@@ -451,38 +394,38 @@ impl Router {
                     // NOTE: Some clients seems to be sending pending acks after reconnection
                     // even during a clean session. Let's be little lineant for now
                     error!("Unsolicited ack = {:?}. Id = {}", packet, id);
-                    return Ok(None)
+                    return Ok(None);
                 }
                 Err(e) => {
                     error!("State error = {:?}. Id = {}", e, id);
                     self.active_connections.remove(id);
-                    return Err::<_, Error>(e.into())
+                    return Err::<_, Error>(e.into());
                 }
             };
 
-            return Ok(Some(reply))
+            return Ok(Some(reply));
         }
 
         Ok(None)
     }
 
     // forwards data to the connection with the following id
-    fn forward_publish(&mut self, subscriber: &Subscriber, mut publish: Publish)  {
+    fn forward_publish(&mut self, subscriber: &Subscriber, mut publish: Publish) {
         publish.qos = subscriber.qos;
 
         if let Some(connection) = self.inactive_connections.get_mut(&subscriber.client_id) {
             debug!("Forwarding publish to active connection. Id = {}, {:?}", subscriber.client_id, publish);
-            connection.state.handle_outgoing_publish(publish); 
-            return
+            connection.state.handle_outgoing_publish(publish);
+            return;
         }
 
         let message = if let Some(connection) = self.active_connections.get_mut(&subscriber.client_id) {
-            let packet = connection.state.handle_outgoing_publish(publish); 
+            let packet = connection.state.handle_outgoing_publish(publish);
             let message = RouterMessage::Packet(packet);
             debug!("Forwarding publish to active connection. Id = {}, {:?}", subscriber.client_id, message);
             message
         } else {
-            return
+            return;
         };
 
         self.forward(&subscriber.client_id, message);
@@ -509,9 +452,6 @@ impl Router {
         }
     }
 }
-
-
-
 
 #[cfg(test)]
 mod test {

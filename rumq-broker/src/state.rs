@@ -2,8 +2,6 @@ use std::{collections::VecDeque, result::Result, time::Instant};
 
 use rumq_core::*;
 
-use crate::router::RouterMessage;
-
 #[derive(Debug)]
 pub enum Error {
     /// Broker's error reply to client's connect packet
@@ -69,7 +67,7 @@ impl MqttState {
     /// user to consume and `Packet` which for the eventloop to put on the network
     /// E.g For incoming QoS1 publish packet, this method returns (Publish, Puback). Publish packet will
     /// be forwarded to user and Pubck packet will be written to network
-    pub fn handle_incoming_mqtt_packet(&mut self, packet: Packet) -> Result<Option<RouterMessage>, Error> {
+    pub fn handle_incoming_mqtt_packet(&mut self, packet: Packet) -> Result<Option<Packet>, Error> {
         let out = match packet {
             Packet::Publish(publish) => self.handle_incoming_publish(publish.clone()),
             Packet::Puback(pkid) => self.handle_incoming_puback(pkid),
@@ -102,7 +100,7 @@ impl MqttState {
 
     /// Results in a publish notification in all the QoS cases. Replys with an ack
     /// in case of QoS1 and Replys rec in case of QoS while also storing the message
-    fn handle_incoming_publish(&mut self, publish: Publish) -> Result<Option<RouterMessage>, Error> {
+    fn handle_incoming_publish(&mut self, publish: Publish) -> Result<Option<Packet>, Error> {
         let qos = publish.qos();
 
         // debug!(
@@ -122,8 +120,7 @@ impl MqttState {
             QoS::AtLeastOnce => {
                 let pkid = publish.pkid().unwrap();
                 let packet = Packet::Puback(pkid);
-                let routermessage = RouterMessage::Packet(packet);
-                Ok(Some(routermessage))
+                Ok(Some(packet))
             }
             QoS::ExactlyOnce => Err(Error::UnsupportedQoS),
         }
@@ -132,7 +129,7 @@ impl MqttState {
     /// Iterates through the list of stored publishes and removes the publish with the
     /// matching packet identifier. Removal is now a O(n) operation. This should be
     /// usually ok in case of acks due to ack ordering in normal conditions.
-    fn handle_incoming_puback(&mut self, pkid: PacketIdentifier) -> Result<Option<RouterMessage>, Error> {
+    fn handle_incoming_puback(&mut self, pkid: PacketIdentifier) -> Result<Option<Packet>, Error> {
         let pkids: Vec<Option<rumq_core::PacketIdentifier>> = self.outgoing_publishes.iter().map(|p| p.pkid).collect();
         debug!("Pkids = {:?}", pkids);
         match self.outgoing_publishes.iter().position(|x| *x.pkid() == Some(pkid)) {
@@ -144,7 +141,7 @@ impl MqttState {
         }
     }
 
-    fn handle_incoming_subscribe(&mut self, mut subscription: Subscribe) -> Result<Option<RouterMessage>, Error> {
+    fn handle_incoming_subscribe(&mut self, mut subscription: Subscribe) -> Result<Option<Packet>, Error> {
         // debug!("Subscribe. Topics = {:?}, Pkid = {:?}", subscription.topics(), subscription.pkid());
 
         let pkid = subscription.pkid;
@@ -174,14 +171,12 @@ impl MqttState {
         }
 
         let packet = Packet::Suback(suback(pkid, subscription_return_codes));
-        let routermessage = RouterMessage::Packet(packet);
-        Ok(Some(routermessage))
+        Ok(Some(packet))
     }
 
-    fn handle_incoming_unsubscribe(&mut self, unsubscribe: Unsubscribe) -> Result<Option<RouterMessage>, Error> {
+    fn handle_incoming_unsubscribe(&mut self, unsubscribe: Unsubscribe) -> Result<Option<Packet>, Error> {
         let packet = Packet::Unsuback(unsubscribe.pkid);
-        let routermessage = RouterMessage::Packet(packet);
-        Ok(Some(routermessage))
+        Ok(Some(packet))
     }
 
     /// Add publish packet to the state and return the packet. This method clones the
